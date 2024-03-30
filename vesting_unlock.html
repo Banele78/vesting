@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+    <script type="module">
+
+        const lockfund=document.getElementById("lock");
+    import {
+        Blockfrost,
+        C,
+        Constr,
+        Data,
+        Lucid,
+       
+        fromHex,
+        toHex,
+        
+      }  from "https://unpkg.com/lucid-cardano@0.8.3/web/mod.js"
+      import * as cbor from "https://deno.land/x/cbor@v1.4.1/index.js";
+       
+      const lucid = await Lucid.new(
+        new Blockfrost(
+            "https://cardano-preprod.blockfrost.io/api/v0",
+            "preprodGAZEMdUuCiAHUwvEDEArXvns7bXu3rpX"
+        ),
+        "Preprod"
+    );
+    
+    
+    const api = await window.cardano.nami.enable();
+    lucid.selectWallet(api);
+    
+    
+    const validator = await readValidator();
+    
+    // --- Supporting functions
+    
+    async function readValidator() {
+      const validatorData = await fetchValidatorData();
+      const validator = JSON.parse(validatorData).validators[0];
+      return {
+        type: "PlutusV2",
+        script: toHex(cbor.encode(fromHex(validator.compiledCode))),
+      };
+    }
+    
+    async function fetchValidatorData() {
+      const response = await fetch("plutus.json");
+      return await response.text();
+    }
+    const beneficiaryPublicKeyHash = lucid.utils.getAddressDetails(
+  await lucid.wallet.address()
+).paymentCredential.hash;
+    // ^^^ Code above is unchanged. ^^^
+
+const scriptAddress = lucid.utils.validatorToAddress(validator);
+
+// we get all the UTXOs sitting at the script address
+const scriptUtxos = await lucid.utxosAt(scriptAddress);
+
+const Datum = Data.Object({
+  lock_until: Data.BigInt, // this is POSIX time, you can check and set it here: https://www.unixtimestamp.com
+  owner: Data.String, // we can pass owner's verification key hash as byte array but also as a string
+  beneficiary: Data.String, // we can beneficiary's hash as byte array but also as a string
+});
+
+const currentTime = new Date().getTime();
+
+// we filter out all the UTXOs by beneficiary and lock_until
+const utxos = scriptUtxos.filter((utxo = { txHash: "25cb5f04facb7b1737ec71663c37c6a7b50c7298ad282b26fe2c9437f4bc52ee", outputIndex: 0 }) => {
+  let datum = Data.from(utxo.datum, Datum);
+
+  return datum.beneficiary === beneficiaryPublicKeyHash &&
+    datum.lock_until <= currentTime;
+});
+
+if (utxos.length === 0) {
+  console.log("No redeemable utxo found. You need to wait a little longer...");
+  
+}
+
+function utf8ToHex(str) {
+    let hex = '';
+    for(let i = 0; i < str.length; i++) {
+        let code = str.charCodeAt(i);
+        if (code < 128) {
+            hex += code.toString(16).padStart(2, '0');
+        } else if (code < 2048) {
+            hex += (code >> 6 | 192).toString(16).padStart(2, '0');
+            hex += (code & 63 | 128).toString(16).padStart(2, '0');
+        } else if (code < 65536) {
+            hex += (code >> 12 | 224).toString(16).padStart(2, '0');
+            hex += ((code >> 6) & 63 | 128).toString(16).padStart(2, '0');
+            hex += (code & 63 | 128).toString(16).padStart(2, '0');
+        } else {
+            hex += (code >> 18 | 240).toString(16).padStart(2, '0');
+            hex += ((code >> 12) & 63 | 128).toString(16).padStart(2, '0');
+            hex += ((code >> 6) & 63 | 128).toString(16).padStart(2, '0');
+            hex += (code & 63 | 128).toString(16).padStart(2, '0');
+        }
+    }
+    return hex;
+}
+
+// we don't have any redeemer in our contract but it needs to be empty
+const redeemer = Data.to(new Constr(0, [utf8ToHex("Hello, Wor")]));
+console.log(redeemer);
+
+const txUnlock = await unlock(utxos, currentTime, { from: validator, using: redeemer });
+
+await lucid.awaitTx(txUnlock);
+
+console.log(`1 tADA recovered from the contract
+    Tx ID: ${txUnlock}
+    Redeemer: ${redeemer}
+`);
+
+// --- Supporting functions
+
+async function unlock(utxos, currentTime, { from, using }) {
+  const laterTime = new Date(currentTime + 2 * 60 * 60 * 1000).getTime(); // add two hours (TTL: time to live)
+
+  const tx = await lucid
+    .newTx()
+    .collectFrom(utxos, using)
+    .addSigner(await lucid.wallet.address()) // this should be beneficiary address
+    .validFrom(currentTime)
+    .validTo(laterTime)
+    .attachSpendingValidator(from)
+    .complete();
+
+  const signedTx = await tx
+    .sign()
+    .complete();
+
+  return signedTx.submit();
+}
+
+    </script>
+</body>
+</html>
